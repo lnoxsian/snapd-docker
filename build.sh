@@ -8,7 +8,7 @@ set -e
 
 CONTNAME=snappy
 IMGNAME=snapd
-RELEASE=22.04
+RELEASE=latest
 
 SUDO=""
 if ! groups | grep -q '\bdocker\b' && [ "$(id -u)" != "0" ]; then
