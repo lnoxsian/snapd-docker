@@ -1,25 +1,23 @@
-#! /bin/sh
+#!/bin/sh
 #
-# make sure to have docker installed before running this script!
-# (tested with the docker.io deb and the docker snap package under
-# ubuntu 16.04)
+# Make sure to have docker installed before running this script!
+# (Tested with recent Docker versions and Ubuntu 22.04)
 #
 
 set -e
 
 CONTNAME=snappy
 IMGNAME=snapd
-RELEASE=18.04
+RELEASE=22.04
 
 SUDO=""
-if [ -z "$(id -Gn|grep docker)" ] && [ "$(id -u)" != "0" ]; then
+if ! groups | grep -q '\bdocker\b' && [ "$(id -u)" != "0" ]; then
     SUDO="sudo"
 fi
 
-if [ "$(which docker)" = "/snap/bin/docker" ]; then
+if [ "$(which docker 2>/dev/null)" = "/snap/bin/docker" ]; then
     export TMPDIR="$(readlink -f ~/snap/docker/current)"
-	# we need to run the snap once to have $SNAP_USER_DATA created
-	/snap/bin/docker >/dev/null 2>&1
+    /snap/bin/docker >/dev/null 2>&1 || true
 fi
 
 BUILDDIR=$(mktemp -d)
@@ -29,7 +27,9 @@ usage() {
     echo
     echo "  -c|--containername <name> (default: snappy)"
     echo "  -i|--imagename <name> (default: snapd)"
-    rm_builddir
+    echo "  -r|--release <ubuntu release> (default: 22.04)"
+    echo
+    exit 0
 }
 
 print_info() {
@@ -49,28 +49,26 @@ clean_up() {
 }
 
 rm_builddir() {
-    rm -rf $BUILDDIR || true
+    rm -rf "$BUILDDIR" || true
     exit 0
 }
 
 trap clean_up 1 2 3 4 9 15
 
 while [ $# -gt 0 ]; do
-       case "$1" in
-               -c|--containername)
-                       [ -n "$2" ] && CONTNAME=$2 shift || usage
-                       ;;
-               -i|--imagename)
-                       [ -n "$2" ] && IMGNAME=$2 shift || usage
-                       ;;
-               -h|--help)
-                       usage
-                       ;;
-               *)
-                       usage
-                       ;;
-       esac
-       shift
+    case "$1" in
+        -c|--containername)
+            [ -n "$2" ] && CONTNAME=$2 && shift || usage ;;
+        -i|--imagename)
+            [ -n "$2" ] && IMGNAME=$2 && shift || usage ;;
+        -r|--release)
+            [ -n "$2" ] && RELEASE=$2 && shift || usage ;;
+        -h|--help)
+            usage ;;
+        *)
+            usage ;;
+    esac
+    shift
 done
 
 if [ -n "$($SUDO docker ps -f name=$CONTNAME -q)" ]; then
@@ -79,30 +77,36 @@ if [ -n "$($SUDO docker ps -f name=$CONTNAME -q)" ]; then
     rm_builddir
 fi
 
-if [ -z "$($SUDO docker images|grep $IMGNAME)" ]; then
-    cat << EOF > $BUILDDIR/Dockerfile
+if ! $SUDO docker images | grep -q "$IMGNAME"; then
+    cat << EOF > "$BUILDDIR/Dockerfile"
 FROM ubuntu:$RELEASE
-ENV container docker
-ENV PATH "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+
 ENV LANG C.UTF-8
 ENV LC_ALL C.UTF-8
-RUN apt-get update &&\
- DEBIAN_FRONTEND=noninteractive\
- apt-get install -y fuse snapd snap-confine squashfuse sudo init &&\
- apt-get clean &&\
- dpkg-divert --local --rename --add /sbin/udevadm &&\
- ln -s /bin/true /sbin/udevadm
-RUN systemctl enable snapd
-VOLUME ["/sys/fs/cgroup"]
-STOPSIGNAL SIGRTMIN+3
-CMD ["/sbin/init"]
+ENV PATH "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y fuse snapd squashfuse && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* && \
+    dpkg-divert --local --rename --add /sbin/udevadm && \
+    ln -s /bin/true /sbin/udevadm
+
+# Snapd workaround for containers
+RUN systemctl mask systemd-udevd.service || true
+
+# Snapd needs /run/snapd to exist
+RUN mkdir -p /run/snapd
+
+# Start snapd as init process is not present
+CMD ["/bin/bash"]
 EOF
-    $SUDO docker build -t $IMGNAME --force-rm=true --rm=true $BUILDDIR || clean_up
+    $SUDO docker build -t $IMGNAME --force-rm=true --rm=true "$BUILDDIR" || clean_up
 fi
 
-# start the detached container
+# Start the detached container
 $SUDO docker run \
-    --name=$CONTNAME \
+    --name="$CONTNAME" \
     -ti \
     --tmpfs /run \
     --tmpfs /run/lock \
@@ -111,26 +115,27 @@ $SUDO docker run \
     --device=/dev/fuse \
     --security-opt apparmor:unconfined \
     --security-opt seccomp:unconfined \
-    -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-    -v /lib/modules:/lib/modules:ro \
     -d $IMGNAME || clean_up
 
-# wait for snapd to start
+# Start snapd in the background
+$SUDO docker exec "$CONTNAME" bash -c "nohup /usr/lib/snapd/snapd &"
+
+# Wait for snapd socket
 TIMEOUT=100
 SLEEP=0.1
 echo -n "Waiting up to $(($TIMEOUT/10)) seconds for snapd startup "
-while [ "$($SUDO docker exec $CONTNAME sh -c 'systemctl status snapd.seeded >/dev/null 2>&1; echo $?')" != "0" ]; do
+while ! $SUDO docker exec "$CONTNAME" test -S /run/snapd.socket; do
     echo -n "."
     sleep $SLEEP || clean_up
+    TIMEOUT=$(($TIMEOUT-1))
     if [ "$TIMEOUT" -le "0" ]; then
         echo " Timed out!"
         clean_up
     fi
-    TIMEOUT=$(($TIMEOUT-1))
 done
 echo " done"
 
-$SUDO docker exec $CONTNAME snap install core --edge || clean_up
+$SUDO docker exec "$CONTNAME" snap install core --edge || clean_up
 echo "container $CONTNAME started ..."
 
 print_info
