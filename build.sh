@@ -8,7 +8,7 @@ set -e
 
 CONTNAME=snappy
 IMGNAME=snapd
-RELEASE=22.04
+RELEASE=latest
 
 SUDO=""
 if ! groups | grep -q '\bdocker\b' && [ "$(id -u)" != "0" ]; then
@@ -108,10 +108,12 @@ fi
 $SUDO docker run \
     --name="$CONTNAME" \
     -ti \
+    -- privileged \
     --tmpfs /run \
     --tmpfs /run/lock \
     --tmpfs /tmp \
     --cap-add SYS_ADMIN \
+    --cap-add SYS_CHROOT \
     --device=/dev/fuse \
     --security-opt apparmor:unconfined \
     --security-opt seccomp:unconfined \
