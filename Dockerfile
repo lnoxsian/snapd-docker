@@ -10,7 +10,7 @@ ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
 # Install snapd and dependencies
 RUN apt-get update && \
     apt-get install -y \
-        snapd fuse squashfuse && \
+        snapd fuse squashfuse git tmux && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
